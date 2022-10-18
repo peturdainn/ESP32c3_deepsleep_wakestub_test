@@ -18,6 +18,10 @@
 #include "rom/gpio.h"
 #include "driver/rtc_io.h"
 
+// bootloader & rom
+#include "bootloader_common.h"
+#include "esp_rom_crc.h"
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 
@@ -33,6 +37,10 @@
 #define WAKETEST_TIMER_INTERVAL_S   10
 #endif
 
+// get a pointer to a memory area that is never cleared, only on external reset or power loss
+// because RTC_DATA_ATTR .bss is cleared by the bootloader for all cases except DSLEEP wakeup.
+#define RTC_RETAIN_MEM_ADDR (SOC_RTC_DRAM_HIGH - sizeof(rtc_retain_mem_t))
+rtc_retain_mem_t *const p_rtc_retain_mem = (rtc_retain_mem_t *)RTC_RETAIN_MEM_ADDR;
 
 #ifdef WAKETEST_USE_TIMER
 #define S_TO_NS 1000000ULL
@@ -72,6 +80,13 @@ static void RTC_IRAM_ATTR wake_stub()
 {
     esp_default_wake_deep_sleep();
 
+    // increment a retained variable, we use the existing custom[] struct member
+    // but you could map your own variable or struct on the 16 bytes custom[] byte array
+    // NOTE 1: the size 16 is defined in sdkconfig setting: CONFIG_BOOTLOADER_CUSTOM_RESERVE_RTC_SIZE
+    // NOTE 2: there's a CRC to be updated, we use a ROM function for it
+    p_rtc_retain_mem->custom[0] += 1;
+    p_rtc_retain_mem->crc = esp_rom_crc32_le(UINT32_MAX, (uint8_t*)p_rtc_retain_mem, sizeof(rtc_retain_mem_t) - sizeof(p_rtc_retain_mem->crc));
+
 #ifdef WAKETEST_USE_GPIO
     // wait for GPIO to go idle, else we keep entering the stub
     while (GPIO_INPUT_GET(WAKETEST_GPIO_NUM) == WAKETEST_GPIO_LEVEL)
@@ -102,7 +117,11 @@ static void RTC_IRAM_ATTR wake_stub()
 
 void app_main(void)
 {
-    printf("Deep sleep test: Booted, sleep in 2 seconds\n");
+    printf("Deep sleep test: Booted, retained value %u, sleep in 2 seconds\n", p_rtc_retain_mem->custom[0]);
+
+    p_rtc_retain_mem->custom[0] = 0;
+    p_rtc_retain_mem->crc = esp_rom_crc32_le(UINT32_MAX, (uint8_t*)p_rtc_retain_mem, sizeof(rtc_retain_mem_t) - sizeof(p_rtc_retain_mem->crc));
+
     vTaskDelay(2000 / portTICK_PERIOD_MS);
 
 #ifdef WAKETEST_USE_GPIO
